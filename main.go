@@ -115,7 +115,8 @@ var (
       fmt.Println("  extractsecret <redemption transaction> <secret hash>")
       fmt.Println("  auditcontract <contract> <contract transaction>")
       fmt.Println("  auditcontractonline <contract> <contract transaction>")
-      fmt.Println("  daemon ")
+      fmt.Println("  daemon")
+      fmt.Println("  pushtx <tx>")
       fmt.Println()
       fmt.Println("Flags:")
       flagset.PrintDefaults()
@@ -213,6 +214,8 @@ func run() (err error, showUsage bool) {
     cmdArgs = 2
   case "daemon":
     cmdArgs = 0
+  case "pushtx":
+    cmdArgs = 1
   default:
     return fmt.Errorf("unknown command %v", args[0]), true
   }
@@ -319,6 +322,13 @@ func run() (err error, showUsage bool) {
     fmt.Println("Server is up and running...")
     log.Fatal(http.ListenAndServe(":8080", nil))
     return nil,false
+  case "pushtx":
+    id,err := pushTx(pushTxInput{Tx:args[1]})
+    if err != nil {
+      log.Fatal(err)
+    }
+    fmt.Println(*id)
+    return nil,false
 
 
 }
@@ -358,7 +368,19 @@ func isFlagPassed(name string) bool {
     })
     return found
 }
+func getTxFee(tx *externalapi.DomainTransaction) uint64{
+  allInputSompi := uint64(0)
+  allOutputSompi := uint64(0)
+  for _, i :=range tx.Inputs{
+      allInputSompi += uint64(i.UTXOEntry.Amount())
 
+  }
+  for _, o :=range tx.Outputs{
+      allOutputSompi += uint64(o.Value)
+
+  }
+  return allInputSompi- allOutputSompi
+}
 func printDomainTransaction(tx *externalapi.DomainTransaction) {
   fmt.Printf("Transaction ID: \t%s\n", consensushashing.TransactionID(tx))
   fmt.Println()
@@ -717,16 +739,16 @@ type auditedContract struct {
   contract      []byte
   contractTx    *externalapi.DomainTransaction
   contractP2SH  util.Address
-  recipient     util.Address
+  recipient     *util.Address
   recipient2b   []byte
   amount        uint64
-  author        util.Address
+  author        *util.Address
   author2b      []byte
   secretHash    []byte
   secretSize    int64
   lockTime      uint64
   daaScore      uint64
-  txId          []byte
+  txId          externalapi.DomainTransactionID
   vspbs         uint64
   isSpendable   bool
   nUtxo         int
@@ -775,7 +797,7 @@ func getContractIn(amount uint64, daemonClient pb.KaspawalletdClient, ctx contex
         },
         SigOpCount:         1,
         UTXOEntry: UTXO.NewUTXOEntry(
-          entry.UTXOEntry.Amount,
+         entry.UTXOEntry.Amount, 
           &externalapi.ScriptPublicKey{
             Version: uint16(entry.UTXOEntry.ScriptPublicKey.Version),
             Script: script_pub_key,
@@ -1192,7 +1214,7 @@ func auditContract(daemonClient pb.KaspawalletdClient, ctx context.Context, keys
   var nUtxo int
   kaspadClient, _ := rpcclient.NewRPCClient(*connectKaspadFlag)
   if kaspadClient != nil {
-    getUTXOsByAddressesResponse,_  := kaspadClient.GetUTXOsByAddresses(addresses)
+    getUTXOsByAddressesResponse,_  := kaspadClient.GetUTXOsByAddresses([]string{contractP2SH.EncodeAddress()})
     dagInfo, _ := kaspadClient.GetBlockDAGInfo()
     vspbs = dagInfo.VirtualDAAScore
     nUtxo = len(getUTXOsByAddressesResponse.Entries)
@@ -1207,15 +1229,16 @@ func auditContract(daemonClient pb.KaspawalletdClient, ctx context.Context, keys
   contract:     cmd.contract,
   contractTx:   cmd.contractTx,
   contractP2SH: contractP2SH,
-  recipient:    *parsed.recipientAddr,
+  recipient:    parsed.recipientAddr,
   recipient2b:  parsed.recipientBlake2b,
   amount:       amount,
-  author:       *parsed.refundAddr,
+  author:       parsed.refundAddr,
   author2b:     parsed.refundBlake2b,
   secretHash:   parsed.secretHash,
   secretSize:   parsed.secretSize,
   lockTime:     parsed.lockTime,
   daaScore:     daaScore,
+  txId:         *txId,
   idx:          *idx,
   nUtxo:        nUtxo,
   vspbs:        vspbs,
@@ -1229,18 +1252,18 @@ func printAuditResult(audited auditedContract) error{
   }
 
 
-  fmt.Printf("Contract address:         %v\n", audited.contractP2SH)
-  fmt.Printf("Contract value:           %.8f\n", getKaspaXSompi(audited.contractTx.Outputs[audited.idx].Value))
-  fmt.Printf("Recipient blake2b:        %x\n", audited.recipient2b)
+  fmt.Printf("Contract address:           %v\n", audited.contractP2SH)
+  fmt.Printf("Contract value:             %.8f\n", getKaspaXSompi(audited.contractTx.Outputs[audited.idx].Value))
+  fmt.Printf("Recipient blake2b:          %x\n", audited.recipient2b)
   if audited.recipient != nil {
     fmt.Printf("Recipient address:        %v\n", audited.recipient)
   }
-  fmt.Printf("Author's refund blake2b:  %x\n", audited.author2b)
+  fmt.Printf("Author's refund blake2b:    %x\n", audited.author2b)
   if audited.author != nil {
     fmt.Printf("Autor's refund address:   %v\n", audited.author)
   }
   fmt.Println("")
-  fmt.Printf("Secret hash(len:%d):      %v\n\n", audited.secretSize, audited.secretHash)
+  fmt.Printf("Secret hash(len:%d):        %x\n", audited.secretSize, audited.secretHash)
 
   if audited.lockTime>= uint64(constants.LockTimeThreshold) {
     t := time.Unix(int64(audited.lockTime/1000), 0)
@@ -1483,7 +1506,7 @@ func parseAuditContractArgs(args auditContractInput) (*auditContractCmd,error){
   },nil
 }
 
-func parseBody[V *buildContractInput | *spendContractInput | *auditContractInput | *extractSecretInput](r *http.Request,args V)(error){
+func parseBody[V *buildContractInput | *spendContractInput | *auditContractInput | *extractSecretInput | *pushTxInput](r *http.Request,args V)(error){
   reqBody, err := ioutil.ReadAll(r.Body)
   if err != nil {
     return errors.New(fmt.Sprintf("failed to read body: %v", err))
@@ -1492,7 +1515,7 @@ func parseBody[V *buildContractInput | *spendContractInput | *auditContractInput
   return nil
 }
 
-func writeResult[V buildContractOutput | spendContractOutput | auditContractOutput | extractSecretOutput](w http.ResponseWriter, err error, result V){
+func writeResult[V buildContractOutput | spendContractOutput | auditContractOutput | extractSecretOutput | pushTxOutput](w http.ResponseWriter, err error, result V){
   if err != nil {
     fmt.Println(err)
     w.WriteHeader(http.StatusInternalServerError)
@@ -1509,8 +1532,9 @@ func restApiRequestsHandlers() {
   http.HandleFunc("/partecipate", partecipateEndpoint)
   http.HandleFunc("/redeem", redeemEndpoint)
   http.HandleFunc("/refund", refundEndpoint)
-  http.HandleFunc("/audit", auditEndpoint)
-  http.HandleFunc("/extract-secret", extractSecretEndpoint)
+  http.HandleFunc("/auditcontract", auditEndpoint)
+  http.HandleFunc("/extractsecret", extractSecretEndpoint)
+  http.HandleFunc("/pushx",pushTxEndpoint)
 }
 
 // Check if BTC / KAS network are available
@@ -1523,10 +1547,28 @@ func isOnlineEndpoint(w http.ResponseWriter, r *http.Request) {
   }
 }
 
+// Check if BTC / KAS network are available
+
 // Dummy function  - To be replaced
 //TODO check kaspad & kaspawallet daemons
 func isOnline() bool {
   return true
+}
+func pushTx(input pushTxInput) (*string, error){
+  tx,err := domainTransactionFromStringHash(input.Tx)
+  if err != nil {
+    return nil,err
+  }
+  return sendRawTransaction(*tx)
+}
+
+func pushTxEndpoint(w http.ResponseWriter, r *http.Request) {
+  var args pushTxInput
+  parseBody(r,&args)
+  txId,err := pushTx(args)
+  writeResult(w,err,pushTxOutput{
+  TxId: *txId,
+  })
 }
 
 // Initiate swap contract
@@ -1564,12 +1606,13 @@ func auditEndpoint(w http.ResponseWriter,r *http.Request){
     ContractAddress:  fmt.Sprintf("%v",data.contractP2SH),
     RecipientAddress: fmt.Sprintf("%v",data.recipient),
     Recipient2b:      fmt.Sprintf("%x",data.recipient2b),
-    Amount:           fmt.Sprintf("%%.8f",data.amount),
+    Amount:           strconv.FormatUint(data.amount,10),
     RefundAddress:    fmt.Sprintf("%v",data.author),
     Refund2b:         fmt.Sprintf("%x",data.author2b),
     SecretHash:       fmt.Sprintf("%x",data.secretHash),
     LockTime:         fmt.Sprintf("%d",data.lockTime),
     TxId:             fmt.Sprintf("%x",data.txId),
+    //TxFee:            strconv.FormatUint(data.txFee,10),
     DaaScore:         fmt.Sprintf("%d",data.daaScore),
     VSPBS:            fmt.Sprintf("%d",data.vspbs),
     IsSpendable:      strconv.FormatBool(data.isSpendable),
@@ -1700,3 +1743,10 @@ type extractSecretInput struct {
 type extractSecretOutput struct {
   Secret  string `json:"Secret"`
 }
+type pushTxInput struct {
+  Tx    string `json:"Tx"`
+}
+type pushTxOutput struct {
+  TxId    string `json:"TxId"`
+}
+
