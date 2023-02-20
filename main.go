@@ -1534,7 +1534,7 @@ func restApiRequestsHandlers() {
   http.HandleFunc("/refund", refundEndpoint)
   http.HandleFunc("/auditcontract", auditEndpoint)
   http.HandleFunc("/extractsecret", extractSecretEndpoint)
-  http.HandleFunc("/pushx",pushTxEndpoint)
+  http.HandleFunc("/pushtx",pushTxEndpoint)
 }
 
 // Check if BTC / KAS network are available
@@ -1566,8 +1566,11 @@ func pushTxEndpoint(w http.ResponseWriter, r *http.Request) {
   var args pushTxInput
   parseBody(r,&args)
   txId,err := pushTx(args)
+  if err != nil {
+    fmt.Println(err)
+  }
   writeResult(w,err,pushTxOutput{
-  TxId: *txId,
+  TxId: fmt.Sprintf("%v",txId),
   })
 }
 
