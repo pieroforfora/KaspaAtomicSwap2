@@ -73,8 +73,8 @@ var (
 
   var feePerInput = uint64(30000)
 
-  var lockTimeInitiateContract = uint64(time.Now().Add(10 * time.Second).Unix()*1000)
-  var lockTimePartecipateContract = uint64(time.Now().Add(5 * time.Second).Unix()*1000)
+  var lockTimeInitiateContract = uint64(time.Now().Add(48 * time.Hour).Unix()*1000)
+  var lockTimePartecipateContract = uint64(time.Now().Add(24 * time.Hour).Unix()*1000)
 
 
   var amountInSompi = uint64(1000000)
@@ -318,7 +318,7 @@ func run() (err error, showUsage bool) {
 
   case "daemon":
     restApiRequestsHandlers()
-    daemonPassword = "pieroforfora"//keys.GetPassword("Password:")
+    daemonPassword = keys.GetPassword("Password:")
     fmt.Println("Server is up and running...")
     log.Fatal(http.ListenAndServe(":8080", nil))
     return nil,false
