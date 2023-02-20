@@ -163,10 +163,6 @@ type auditContractCmd struct {
   contract   []byte
   contractTx *externalapi.DomainTransaction
 }
-type auditContractOnlineCmd struct {
-  contract   []byte
-  contractTx *externalapi.DomainTransaction
-}
 
 func main() {
   err, showUsage := run()
@@ -243,6 +239,7 @@ func run() (err error, showUsage bool) {
 
 
   var cmd command
+  isOnline := false
   switch args[0] {
   case "initiate":
     input,err := parseBuildArgs(buildContractInput{
@@ -313,7 +310,8 @@ func run() (err error, showUsage bool) {
     if err != nil{
       log.Fatal(err)
     }
-    cmd = &auditContractOnlineCmd{contract: input.contract, contractTx: input.contractTx}
+    isOnline =true
+    cmd = &auditContractCmd{contract: input.contract, contractTx: input.contractTx}
 
   case "daemon":
     restApiRequestsHandlers()
@@ -328,10 +326,11 @@ func run() (err error, showUsage bool) {
     log.Fatal(err)
   }
   // Offline commands don't need to talk to the wallet.
-  if cmd, ok := cmd.(offlineCommand); ok {
-    return cmd.runOfflineCommand(), false
+  if !isOnline {
+    if  cmd, ok := cmd.(offlineCommand); ok {
+      return cmd.runOfflineCommand(), false
+    }
   }
-
   daemonClient, tearDown, err := client.Connect(*connectWalletFlag)
   if err != nil {
     log.Fatal(err)
@@ -549,7 +548,7 @@ const (
   CoinType = 111111
 )
 
-func printAddressPushes(name string, addresses []string ,blake []byte,keysFile *keys.File)(*util.Address, *string){
+func getAddressPushes(name string, addresses []string ,blake []byte,keysFile *keys.File)(*util.Address, *string){
   var addr *util.Address
   var path *string
   if keysFile != nil{
@@ -572,16 +571,22 @@ func printAddressPushes(name string, addresses []string ,blake []byte,keysFile *
 
 }
 
-func parsePushes(contractr []byte,addresses []string, keysFile *keys.File)(*util.Address, *string, []byte, *util.Address, *string, []byte, []byte, int64, uint64){
+func parsePushes(contractr []byte,addresses []string, keysFile *keys.File)(*parsedPushes,error){
   pushes, err := txscript.ExtractAtomicSwapDataPushes(0, contractr)
   if err != nil {
-    log.Fatal(err)
+    return nil,errors.New(fmt.Sprintf("Impssible to extract Atomic Swap: %v",err))
   }
   if pushes == nil {
-    log.Fatal("contract is not an atomic swap script recognized by this tool")
+    return nil,errors.New("contract is not an atomic swap script recognized by this tool")
   }
-  recipientAddr, recipient_path := printAddressPushes("Recipient", addresses, pushes.RecipientBlake2b[:], keysFile)
-  refundAddr, refund_path := printAddressPushes("Refund", addresses, pushes.RefundBlake2b[:], keysFile)
+  var recipientAddr *util.Address
+  var recipient_path *string
+  var refundAddr *util.Address
+  var refund_path *string
+  if keysFile != nil && addresses != nil{
+    recipientAddr, recipient_path = getAddressPushes("Recipient", addresses, pushes.RecipientBlake2b[:], keysFile)
+    refundAddr, refund_path = getAddressPushes("Refund", addresses, pushes.RefundBlake2b[:], keysFile)
+  }
 
   if *verboseFlag{
     fmt.Println("Pushes - Secret hash from Contract:")
@@ -596,9 +601,18 @@ func parsePushes(contractr []byte,addresses []string, keysFile *keys.File)(*util
     fmt.Println(pushes.LockTime, "-",time.Unix(int64(pushes.LockTime/1000), 0))
     fmt.Println("")
   }
-  return recipientAddr, recipient_path, pushes.RecipientBlake2b[:], refundAddr, refund_path, pushes.RefundBlake2b[:], pushes.SecretHash[:], pushes.SecretSize, pushes.LockTime
+  return &parsedPushes{
+    recipientAddr:    recipientAddr,
+    recipient_path:   recipient_path,
+    recipientBlake2b: pushes.RecipientBlake2b[:],
+    refundAddr:       refundAddr,
+    refund_path:      refund_path,
+    refundBlake2b: pushes.RefundBlake2b[:],
+    secretHash:    pushes.SecretHash[:],
+    secretSize:       pushes.SecretSize,
+    lockTime:         pushes.LockTime,
+    },nil
 }
-
 // sendRawTransaction calls the signRawTransaction JSON-RPC method.  It is
 // implemented manually as client support is currently outdated from the
 // btcd/rpcclient package.
@@ -700,6 +714,8 @@ type builtSpend struct {
   spendTxFee    uint64
 }
 type auditedContract struct {
+  contract      []byte
+  contractTx    *externalapi.DomainTransaction
   contractP2SH  util.Address
   recipient     util.Address
   recipient2b   []byte
@@ -709,6 +725,24 @@ type auditedContract struct {
   secretHash    []byte
   secretSize    int64
   lockTime      uint64
+  daaScore      uint64
+  txId          []byte
+  vspbs         uint64
+  isSpendable   bool
+  nUtxo         int
+  idx           int
+}
+
+type parsedPushes struct {
+recipientAddr     *util.Address
+recipient_path    *string
+recipientBlake2b  []byte
+refundAddr        *util.Address
+refund_path       *string
+refundBlake2b     []byte
+secretHash        []byte
+secretSize        int64
+lockTime          uint64
 }
 
 func getContractIn(amount uint64, daemonClient pb.KaspawalletdClient, ctx context.Context, keysFile *keys.File) ([]*externalapi.DomainTransactionInput,uint64,[]string) {
@@ -891,14 +925,14 @@ func getFee(inputs []*externalapi.DomainTransactionInput) uint64{
   return uint64(feePerInput)*uint64(len(inputs)+1)
 }
 
-func getContractOut(contractr []byte, tx *externalapi.DomainTransaction) int {
+func getContractOut(contractr []byte, tx *externalapi.DomainTransaction) *int {
   contractHash, _ := txscript.PayToScriptHashScript(contractr)
   for idx, outputs := range tx.Outputs {
     if hex.EncodeToString(contractHash) == hex.EncodeToString(outputs.ScriptPublicKey.Script){
-      return idx
+      return &idx
     }
   }
-  panic("contract not fonud")
+  return nil
 }
 
 func spendContract(mnemonics []string, daemonClient pb.KaspawalletdClient, ctx context.Context, keysFile *keys.File, args *spendArgs)(*builtSpend,error) {
@@ -910,24 +944,24 @@ func spendContract(mnemonics []string, daemonClient pb.KaspawalletdClient, ctx c
     log.Fatal(err)
   }
   addresses := addressesResponse.Address
-  redeemAddr, redeem_path,_, refundAddr, refund_path, _, _, _, lockTime := parsePushes(args.contract, addresses,keysFile)
+  parsed,_:= parsePushes(args.contract, addresses,keysFile)
   isRedeem := (args.secret != nil)
-  if (refundAddr == nil || refund_path == nil) && !isRedeem {
+  if (parsed.refundAddr == nil || parsed.refund_path == nil) && !isRedeem {
     log.Fatal("refundAddress is unknown I'm not able to sign refund transaction")
   } else {
-    if (redeemAddr == nil || redeem_path == nil) && isRedeem{
+    if (parsed.recipientAddr == nil || parsed.recipient_path == nil) && isRedeem{
       log.Fatal("redeemAddress is unknown I'm not able to sign redeem transaction")
     }
   }
   var recipientAddr *util.Address
   var recipient_path *string
   if isRedeem{
-    lockTime=uint64(0)
-    recipientAddr = redeemAddr
-    recipient_path = redeem_path
+    parsed.lockTime=uint64(0)
+    recipientAddr = parsed.recipientAddr
+    recipient_path = parsed.recipient_path
   }else{
-    recipientAddr=refundAddr
-    recipient_path = refund_path
+    recipientAddr= parsed.refundAddr
+    recipient_path = parsed.refund_path
   }
   derivedKey,serializedPublicKey := getKeys(*recipient_path,mnemonics,keysFile)
   inputs := []*externalapi.DomainTransactionInput{{
@@ -937,7 +971,7 @@ func spendContract(mnemonics []string, daemonClient pb.KaspawalletdClient, ctx c
     },
     SigOpCount: 1,
     //  Sequence: math.MaxUint64-1,
-    UTXOEntry: UTXO.NewUTXOEntry(args.contractTx.Outputs[contract_idx].Value,args.contractTx.Outputs[contract_idx].ScriptPublicKey,false,0),
+    UTXOEntry: UTXO.NewUTXOEntry(args.contractTx.Outputs[*contract_idx].Value,args.contractTx.Outputs[*contract_idx].ScriptPublicKey,false,0),
   }}
 
   spend_fees := getFee(inputs)
@@ -950,12 +984,12 @@ func spendContract(mnemonics []string, daemonClient pb.KaspawalletdClient, ctx c
   }}
 
   domainTransaction := &externalapi.DomainTransaction{
-    Version: constants.MaxTransactionVersion,
-    Outputs: outputs,
-    Inputs: inputs,
-    LockTime:     lockTime,
-    Gas:          0,
-    Payload:      []byte{},
+    Version:  constants.MaxTransactionVersion,
+    Outputs:  outputs,
+    Inputs:   inputs,
+    LockTime: parsed.lockTime,
+    Gas:      0,
+    Payload:  []byte{},
   }
   sighashReusedValues := &consensushashing.SighashReusedValues{}
   signature,_ := rawTxInSignature(derivedKey, domainTransaction, 0, consensushashing.SigHashAll, sighashReusedValues, keysFile.ECDSA)
@@ -1105,12 +1139,12 @@ func (cmd *auditContractCmd) runCommand(mnemonics []string, daemonClient pb.Kasp
   return cmd.runOfflineCommand()
 }
 
-func (cmd *auditContractOnlineCmd) runCommand(mnemonics []string, daemonClient pb.KaspawalletdClient, ctx context.Context, keysFile *keys.File) error {
-  addresses := getAddresses(daemonClient,ctx)
-  redeem_addr, _, redeem2b, refund_addr, _, refund2b, secretHash, pushesSecretSize, locktime := parsePushes(cmd.contract,addresses,keysFile)
-  printAuditResult(cmd.contract,cmd.contractTx,redeem_addr,redeem2b,refund_addr,refund2b,secretHash,pushesSecretSize,locktime)
-
-
+func (cmd *auditContractCmd) runOfflineCommand() error {
+  audited,err := auditContract(nil, nil, nil, *cmd)
+  if err != nil {
+    panic(err)
+  }
+  printAuditResult(*audited)
   return nil
 }
 
@@ -1134,54 +1168,82 @@ func extractSecret(args extractSecretCmd) ([]byte, error) {
 
 }
 func auditContract(daemonClient pb.KaspawalletdClient, ctx context.Context, keysFile *keys.File,cmd auditContractCmd)(*auditedContract, error){
-  addresses := getAddresses(daemonClient,ctx)
-  redeem_addr, _, redeem2b, refund_addr, _, refund2b, secretHash, pushesSecretSize, lockTime := parsePushes(cmd.contract,addresses,keysFile)
+  var addresses []string
+  if daemonClient != nil && ctx != nil {
+    addresses = getAddresses(daemonClient,ctx)
+  }
   contractP2SH, err := util.NewAddressScriptHash(cmd.contract, chainParams.Prefix)
   if err != nil {
-    return nil, errors.New(fmt.Sprintf("Impossible to determine contract hash %v:",err))
+    return nil, errors.New(fmt.Sprintf("Impossible to determine contract hash: %v",err))
+  }
+  parsed,err := parsePushes(cmd.contract,addresses,keysFile)
+  if err != nil {
+    return nil, errors.New(fmt.Sprintf("Impossible to  parse pushes: %v",err))
   }
   idx := getContractOut(cmd.contract,cmd.contractTx)
-  amount := cmd.contractTx.Outputs[idx].Value
-
+  if idx == nil{
+    return nil, errors.New(fmt.Sprintf("Transaction does no contain contract"))
+  }
+  amount := cmd.contractTx.Outputs[*idx].Value
+  txId := consensushashing.TransactionID(cmd.contractTx)
+  var isSpendable bool
+  var daaScore uint64
+  var vspbs uint64
+  var nUtxo int
+  kaspadClient, _ := rpcclient.NewRPCClient(*connectKaspadFlag)
+  if kaspadClient != nil {
+    getUTXOsByAddressesResponse,_  := kaspadClient.GetUTXOsByAddresses(addresses)
+    dagInfo, _ := kaspadClient.GetBlockDAGInfo()
+    vspbs = dagInfo.VirtualDAAScore
+    nUtxo = len(getUTXOsByAddressesResponse.Entries)
+    for _, entry := range getUTXOsByAddressesResponse.Entries {
+      if entry.Outpoint.TransactionID == txId.String(){
+        isSpendable = isUTXOSpendable(entry, vspbs)
+        daaScore = entry.UTXOEntry.BlockDAAScore
+      }
+    }
+  }
   return &auditedContract{
+  contract:     cmd.contract,
+  contractTx:   cmd.contractTx,
   contractP2SH: contractP2SH,
-  recipient:    *redeem_addr,
-  recipient2b:  redeem2b,
+  recipient:    *parsed.recipientAddr,
+  recipient2b:  parsed.recipientBlake2b,
   amount:       amount,
-  author:       *refund_addr,
-  author2b:     refund2b,
-  secretHash:   secretHash,
-  secretSize:   pushesSecretSize,
-  lockTime:     lockTime,
+  author:       *parsed.refundAddr,
+  author2b:     parsed.refundBlake2b,
+  secretHash:   parsed.secretHash,
+  secretSize:   parsed.secretSize,
+  lockTime:     parsed.lockTime,
+  daaScore:     daaScore,
+  idx:          *idx,
+  nUtxo:        nUtxo,
+  vspbs:        vspbs,
+  isSpendable:  isSpendable,
   },nil
 }
 
-func printAuditResult(contract []byte, contractTx *externalapi.DomainTransaction , recipient_addr *util.Address, recipient2b []byte, refund_addr *util.Address, refund2b []byte, secretHash []byte, pushesSecretSize int64, locktime uint64 ) error{
-  idx := getContractOut(contract,contractTx)
-  if pushesSecretSize != secretSize {
-    return fmt.Errorf("contract specifies strange secret size %v", pushesSecretSize)
+func printAuditResult(audited auditedContract) error{
+  if audited.secretSize != secretSize {
+    return fmt.Errorf("contract specifies strange secret size %v", audited.secretSize)
   }
 
-  contractP2SH, err := util.NewAddressScriptHash(contract, chainParams.Prefix)
-  if err != nil {
-    log.Fatal(err)
-  }
 
-  fmt.Printf("Contract address:         %v\n", contractP2SH)
-  fmt.Printf("Contract value:           %.8f\n", getKaspaXSompi(contractTx.Outputs[idx].Value))
-  fmt.Printf("Recipient blake2b:        %x\n", recipient2b)
-  if recipient_addr != nil {
-    fmt.Printf("Recipient address:        %v\n", *recipient_addr)
+  fmt.Printf("Contract address:         %v\n", audited.contractP2SH)
+  fmt.Printf("Contract value:           %.8f\n", getKaspaXSompi(audited.contractTx.Outputs[audited.idx].Value))
+  fmt.Printf("Recipient blake2b:        %x\n", audited.recipient2b)
+  if audited.recipient != nil {
+    fmt.Printf("Recipient address:        %v\n", audited.recipient)
   }
-  fmt.Printf("Author's refund blake2b:  %x\n", refund2b)
-  if refund_addr != nil {
-    fmt.Printf("Autor's refund address:   %v\n", *refund_addr)
+  fmt.Printf("Author's refund blake2b:  %x\n", audited.author2b)
+  if audited.author != nil {
+    fmt.Printf("Autor's refund address:   %v\n", audited.author)
   }
   fmt.Println("")
-  fmt.Printf("Secret hash(len:%d):      %v\n\n", secretSize, secretHash)
+  fmt.Printf("Secret hash(len:%d):      %v\n\n", audited.secretSize, audited.secretHash)
 
-  if locktime>= uint64(constants.LockTimeThreshold) {
-    t := time.Unix(int64(locktime/1000), 0)
+  if audited.lockTime>= uint64(constants.LockTimeThreshold) {
+    t := time.Unix(int64(audited.lockTime/1000), 0)
     fmt.Printf("Locktime: %v\n", t.UTC())
     reachedAt := time.Until(t).Truncate(time.Second)
     if reachedAt > 0 {
@@ -1190,17 +1252,12 @@ func printAuditResult(contract []byte, contractTx *externalapi.DomainTransaction
       fmt.Printf("Contract refund time lock has expired\n")
     }
   } else {
-    fmt.Printf("Locktime: block %v\n", locktime)
+    fmt.Printf("Locktime: block %v\n", audited.lockTime)
   }
 
   return nil
 }
 
-func (cmd *auditContractCmd) runOfflineCommand() error {
-  _, _, redeem2b, _, _, refund2b, secretHash, pushesSecretSize, locktime := parsePushes(cmd.contract,[]string{},nil)
-  printAuditResult(cmd.contract,cmd.contractTx,nil,redeem2b,nil,refund2b,secretHash,pushesSecretSize,locktime)
-  return nil
-}
 
 
 // atomicSwapContract returns an output script that may be redeemed by one of
@@ -1467,6 +1524,7 @@ func isOnlineEndpoint(w http.ResponseWriter, r *http.Request) {
 }
 
 // Dummy function  - To be replaced
+//TODO check kaspad & kaspawallet daemons
 func isOnline() bool {
   return true
 }
@@ -1505,9 +1563,16 @@ func auditEndpoint(w http.ResponseWriter,r *http.Request){
   writeResult(w,err,auditContractOutput{
     ContractAddress:  fmt.Sprintf("%v",data.contractP2SH),
     RecipientAddress: fmt.Sprintf("%v",data.recipient),
-    Amount:   fmt.Sprintf("%%.8f",data.amount),
+    Recipient2b:      fmt.Sprintf("%x",data.recipient2b),
+    Amount:           fmt.Sprintf("%%.8f",data.amount),
     RefundAddress:    fmt.Sprintf("%v",data.author),
+    Refund2b:         fmt.Sprintf("%x",data.author2b),
     SecretHash:       fmt.Sprintf("%x",data.secretHash),
+    LockTime:         fmt.Sprintf("%d",data.lockTime),
+    TxId:             fmt.Sprintf("%x",data.txId),
+    DaaScore:         fmt.Sprintf("%d",data.daaScore),
+    VSPBS:            fmt.Sprintf("%d",data.vspbs),
+    IsSpendable:      strconv.FormatBool(data.isSpendable),
   })
 
 }
@@ -1620,7 +1685,13 @@ type  auditContractOutput struct {
   SecretHash        string `json:"SecretHash"`
   LockTime          string `json:"LockTime"`
   TxId              string `json:"TxId"`
+  //Utxo blockDAAScore
   DaaScore          string `json:"DaaScore"`
+  //virtualSelectedParentBlueScore
+  VSPBS             string `json:"VSPBS"`
+  //minConfirmations :=10
+  //blockDAAScore+minConfirmations < virtualSelectedParentBlueScore 
+  IsSpendable       string `json:"IsSpendable"`
 }
 type extractSecretInput struct {
   Tx          string `json:"Transaction"`
