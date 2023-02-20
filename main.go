@@ -1516,11 +1516,11 @@ func parseBody[V *buildContractInput | *spendContractInput | *auditContractInput
 }
 
 func writeResult[V buildContractOutput | spendContractOutput | auditContractOutput | extractSecretOutput | pushTxOutput](w http.ResponseWriter, err error, result V){
-  if err != nil {
-    fmt.Println(err)
-    w.WriteHeader(http.StatusInternalServerError)
-  } else {
     w.Header().Set("Content-Type", "application/json")
+  if err != nil {
+    fmt.Println("/////////////////////////////////error",err)
+    json.NewEncoder(w).Encode(errOutput{Err:fmt.Sprintf("%v",err)})
+  } else {
     json.NewEncoder(w).Encode(result)
   }
 }
@@ -1561,16 +1561,22 @@ func pushTx(input pushTxInput) (*string, error){
   }
   return sendRawTransaction(*tx)
 }
-
+func getNil(s *string) string{
+  if s == nil {
+    return ""
+  }else{
+    return *s
+  }
+}
 func pushTxEndpoint(w http.ResponseWriter, r *http.Request) {
   var args pushTxInput
   parseBody(r,&args)
   txId,err := pushTx(args)
   if err != nil {
-    fmt.Println(err)
+    fmt.Println("pèorcodio",err)
   }
   writeResult(w,err,pushTxOutput{
-  TxId: fmt.Sprintf("%v",txId),
+  TxId: fmt.Sprintf("%v",getNil(txId)),
   })
 }
 
@@ -1752,4 +1758,6 @@ type pushTxInput struct {
 type pushTxOutput struct {
   TxId    string `json:"TxId"`
 }
-
+type errOutput struct {
+  Err string `json:"Err"`
+}
