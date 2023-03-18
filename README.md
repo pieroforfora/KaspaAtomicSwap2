@@ -25,7 +25,7 @@ branch
 download it locally and use replace method in the go.mod file
 
 
-
+`
 Usage: kaspaatomicswap [flags] cmd [cmd args]
 
 
@@ -84,7 +84,7 @@ Flags:
 
     	verbose
 
-
+`
 
 
 
