@@ -1,4 +1,4 @@
-module github.com/decred/atomicswap/cmd/kspatomicswap
+module github.com/pieroforfora/KaspaAtomicSwap2
 
 go 1.18
 

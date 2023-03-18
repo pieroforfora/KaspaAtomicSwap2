@@ -54,14 +54,16 @@ var (
   flagset     = flag.NewFlagSet("", flag.ExitOnError)
     connectWalletFlag = flagset.String("kaspawallet", "localhost:8082", "host[:port] of kaspawallet  RPC server")
     connectKaspadFlag = flagset.String("kaspad", "localhost:16610", "host[:port] of kaspad RPC server")
-  //  rpcuserFlag = flagset.String("rpcuser", "", "username for wallet RPC authentication")
-  //  rpcpassFlag = flagset.String("rpcpass", "", "password for wallet RPC authentication")
+
+    ltInitiate = flagset.Int("ltInitiate", 48, "min initiate locktime in hours ")
+    ltPartecipate = flagset.Int("ltPartecipate", 24, "min partecipate locktime in hours")
+    sS = flagset.Int64("secretSize", 32, "min partecipate locktime in hours")
+
     testnetFlag = flagset.Bool("testnet", false, "use testnet network")
     devnetFlag = flagset.Bool("devnet", false, "use devnet network")
     verboseFlag = flagset.Bool("verbose", false, "verbose")
   )
 
-  const secretSize = 32
 
   var (
     defaultAppDir = util.AppDir("kaspawallet", false)
@@ -72,10 +74,9 @@ var (
 
 
   var feePerInput = uint64(30000)
+  var secretSize = *sS
 
-  var lockTimeInitiateContract = uint64(time.Now().Add(48 * time.Hour).Unix()*1000)
-  var lockTimePartecipateContract = uint64(time.Now().Add(24 * time.Hour).Unix()*1000)
-
+  
 
   var amountInSompi = uint64(1000000)
   var daemonPassword string
@@ -103,56 +104,62 @@ var (
   //     - must verify H(S) in contract is hash of known secret
   //   cp2 redeems btc with S
 
-  func init() {
-    flagset.Usage = func() {
-      fmt.Println("Usage: btcatomicswap [flags] cmd [cmd args]")
-      fmt.Println()
-      fmt.Println("Commands:")
-      fmt.Println("  initiate <participant address> <amount>")
-      fmt.Println("  participate <initiator address> <amount> <secret hash>")
-      fmt.Println("  redeem <contract> <contract transaction> <secret>")
-      fmt.Println("  refund <contract> <contract transaction>")
-      fmt.Println("  extractsecret <redemption transaction> <secret hash>")
-      fmt.Println("  auditcontract <contract> <contract transaction>")
-      fmt.Println("  auditcontractonline <contract> <contract transaction>")
-      fmt.Println("  daemon")
-      fmt.Println("  pushtx <tx>")
-      fmt.Println()
-      fmt.Println("Flags:")
-      flagset.PrintDefaults()
-    }
+func init() {
+  flagset.Usage = func() {
+    fmt.Println("Usage: btcatomicswap [flags] cmd [cmd args]")
+    fmt.Println()
+    fmt.Println("Commands:")
+    fmt.Println("  initiate <participant address> <amount>")
+    fmt.Println("  participate <initiator address> <amount> <secret hash>")
+    fmt.Println("  redeem <contract> <contract transaction> <secret>")
+    fmt.Println("  refund <contract> <contract transaction>")
+    fmt.Println("  extractsecret <redemption transaction> <secret hash>")
+    fmt.Println("  auditcontract <contract> <contract transaction>")
+    fmt.Println("  auditcontractonline <contract> <contract transaction>")
+    fmt.Println("  daemon")
+    fmt.Println("  pushtx <tx>")
+    fmt.Println()
+    fmt.Println("Flags:")
+    flagset.PrintDefaults()
   }
-
-  type command interface {
-    runCommand([]string, pb.KaspawalletdClient, context.Context, *keys.File) error
-  }
-
-  // offline commands don't require wallet RPC.
-  type offlineCommand interface {
-    command
-    runOfflineCommand() error
-  }
-
-  type initiateCmd struct {
-    cp2Addr *util.AddressPublicKey
-    amount  uint64
 }
 
-type participateCmd struct {
-  cp1Addr    *util.AddressPublicKey
+type command interface {
+  runCommand([]string, pb.KaspawalletdClient, context.Context, *keys.File) error
+}
+
+// offline commands don't require wallet RPC.
+type offlineCommand interface {
+  command
+  runOfflineCommand() error
+}
+
+type daemonOutput interface{
+   buildContractOutput | spendContractOutput | auditContractOutput | extractSecretOutput | pushTxOutput | atomicSwapParamsOutput | walletBalanceOutput
+}
+
+type daemonCommand interface {
+    runDaemonCommand([]string, pb.KaspawalletdClient, context.Context, *keys.File)(any,error)
+}
+
+// contractArgs specifies the common parameters used to create the initiator's
+// and participant's contract.
+type contractArgsCmd struct {
+  them       *util.AddressPublicKey
   amount     uint64
+  locktime   uint64
   secretHash []byte
-}
-
-type redeemCmd struct {
-  contract   []byte
-  contractTx **externalapi.DomainTransaction
   secret     []byte
 }
+type walletBalanceCmd struct {}
+type atomicSwapParamsCmd struct {}
 
-type refundCmd struct {
-  contract   []byte
-  contractTx *externalapi.DomainTransaction
+
+type spendArgsCmd struct {
+  contract    []byte
+  contractTx  *externalapi.DomainTransaction
+  secret      []byte
+
 }
 
 type extractSecretCmd struct {
@@ -245,17 +252,16 @@ func run() (err error, showUsage bool) {
   isOnline := false
   switch args[0] {
   case "initiate":
-    input,err := parseBuildArgs(buildContractInput{
+    cmd,err = parseBuildArgs(buildContractInput{
         Them:   args[1],
         Amount: args[2],
     })
     if err != nil{
       log.Fatal(err)
     }
-    cmd = &initiateCmd{cp2Addr: input.them, amount: input.amount}
 
   case "participate":
-    input,err := parseBuildArgs(buildContractInput{
+    cmd,err = parseBuildArgs(buildContractInput{
         Them:       args[1],
         Amount:     args[2],
         SecretHash: &args[3],
@@ -263,9 +269,8 @@ func run() (err error, showUsage bool) {
     if err != nil{
       log.Fatal(err)
     }
-    cmd = &participateCmd{cp1Addr: input.them, amount: input.amount, secretHash: input.secretHash}
   case "redeem":
-    input,err := parseSpendArgs(spendContractInput{
+    cmd,err = parseSpendArgs(spendContractInput{
       Contract:   args[1],
       Tx:         args[2],
       Secret:     &args[3],
@@ -273,40 +278,36 @@ func run() (err error, showUsage bool) {
     if err != nil{
       log.Fatal(err)
     }
-    cmd = &redeemCmd{contract: input.contract, contractTx: &input.contractTx, secret: input.secret}
 
   case "refund":
-    input,err := parseSpendArgs(spendContractInput{
+    cmd,err = parseSpendArgs(spendContractInput{
       Contract: args[1],
       Tx:       args[2],
     })
     if err != nil{
       log.Fatal(err)
     }
-    cmd = &refundCmd{contract: input.contract, contractTx: input.contractTx}
 
   case "extractsecret":
-    input,err := parseExtractSecretArgs(extractSecretInput{
+    cmd,err = parseExtractSecretArgs(extractSecretInput{
       Tx:         args[1],
       SecretHash: args[2],
     })
     if err != nil{
       log.Fatal(err)
     }
-    cmd = &extractSecretCmd{redemptionTx: input.redemptionTx, secretHash: input.secretHash}
 
   case "auditcontract":
-    input,err := parseAuditContractArgs(auditContractInput{
+    cmd,err = parseAuditContractArgs(auditContractInput{
       Contract: args[1],
       Tx:       args[2],
     })
     if err != nil{
       log.Fatal(err)
     }
-    cmd = &auditContractCmd{contract: input.contract, contractTx: input.contractTx}
 
   case "auditcontractonline":
-    input,err := parseAuditContractArgs(auditContractInput{
+    cmd,err = parseAuditContractArgs(auditContractInput{
       Contract: args[1],
       Tx:       args[2],
     })
@@ -314,7 +315,6 @@ func run() (err error, showUsage bool) {
       log.Fatal(err)
     }
     isOnline =true
-    cmd = &auditContractCmd{contract: input.contract, contractTx: input.contractTx}
 
   case "daemon":
     restApiRequestsHandlers()
@@ -322,6 +322,7 @@ func run() (err error, showUsage bool) {
     fmt.Println("Server is up and running...")
     log.Fatal(http.ListenAndServe(":8080", nil))
     return nil,false
+
   case "pushtx":
     id,err := pushTx(pushTxInput{Tx:args[1]})
     if err != nil {
@@ -703,23 +704,6 @@ func promptPublishTx(tx externalapi.DomainTransaction, name string, daemonClient
   }
 }
 
-// contractArgs specifies the common parameters used to create the initiator's
-// and participant's contract.
-type contractArgs struct {
-  them       *util.AddressPublicKey
-  amount     uint64
-  locktime   uint64
-  secretHash []byte
-  secret     []byte
-}
-
-type spendArgs struct {
-  contract    []byte
-  contractTx  *externalapi.DomainTransaction
-  secret      []byte
-
-}
-
 // builtContract houses the details regarding a contract and the contract
 // payment transaction, as well as the transaction to perform a refund.
 type builtContract struct {
@@ -837,7 +821,7 @@ func isUTXOSpendable(entry *appmessage.UTXOsByAddressesEntry, virtualSelectedPar
 // buildContract creates a contract for the parameters specified in args, using
 // wallet RPC to generate an internal address to redeem the refund and to sign
 // the payment to the contract transaction.
-func buildContract(daemonClient pb.KaspawalletdClient, ctx context.Context, mnemonics []string, keysFile *keys.File, args *contractArgs) (*builtContract, error) {
+func buildContract(daemonClient pb.KaspawalletdClient, ctx context.Context, mnemonics []string, keysFile *keys.File, args *contractArgsCmd) (*builtContract, error) {
   refundAddr := getRawChangeAddress(daemonClient,ctx)
   refundAddrH := getBlake2b(refundAddr.ScriptAddress())
   themAddrH := getBlake2b(args.them.ScriptAddress())
@@ -957,7 +941,7 @@ func getContractOut(contractr []byte, tx *externalapi.DomainTransaction) *int {
   return nil
 }
 
-func spendContract(mnemonics []string, daemonClient pb.KaspawalletdClient, ctx context.Context, keysFile *keys.File, args *spendArgs)(*builtSpend,error) {
+func spendContract(mnemonics []string, daemonClient pb.KaspawalletdClient, ctx context.Context, keysFile *keys.File, args *spendArgsCmd)(*builtSpend,error) {
   contract_idx := getContractOut(args.contract,args.contractTx)
   txid := consensushashing.TransactionID(args.contractTx)
 
@@ -1038,7 +1022,8 @@ func sha256Hash(x []byte) []byte {
 }
 func getSecret()([]byte,[]byte, error){
 
-  var secret [secretSize]byte
+  //var secret [int(secretSize)]byte
+  var secret =make([]byte,secretSize)
   _, err := rand.Read(secret[:])
   if err != nil {
     return nil,nil,err
@@ -1047,25 +1032,29 @@ func getSecret()([]byte,[]byte, error){
   return secret[:],secretHash,nil
 }
 
-func (cmd *initiateCmd) runCommand(mnemonics []string, daemonClient pb.KaspawalletdClient, ctx context.Context, keysFile *keys.File) error {
-
-  secret, secretHash,_ := getSecret()
-
-  // locktime after 500,000,000 (Tue Nov  5 00:53:20 1985 UTC) is interpreted
-  // as a unix time rather than a block height.
-
-  b, err := buildContract(daemonClient, ctx, mnemonics, keysFile,
-    &contractArgs{
-      them:       cmd.cp2Addr,
-      amount:     cmd.amount,
-      locktime:   lockTimeInitiateContract,
-      secretHash: secretHash,
-    })
+func (cmd *contractArgsCmd) runCommand(mnemonics []string, daemonClient pb.KaspawalletdClient, ctx context.Context, keysFile *keys.File) error {
+  b, err := buildContract(daemonClient, ctx, mnemonics, keysFile,cmd)
   if err != nil {
     return err
   }
-  printCommand(secret[:],secretHash,b)
+  printCommand(cmd.secret,cmd.secretHash,b)
   return promptPublishTx(*b.contractTx, "contract",daemonClient,ctx)
+}
+
+func (cmd *contractArgsCmd) runDaemonCommand(mnemonics []string, daemonClient pb.KaspawalletdClient, ctx context.Context, keysFile *keys.File) (any,error){
+  data, err := buildContract(daemonClient, ctx, mnemonics, keysFile,cmd)
+  if err != nil {
+    return nil,err
+  }
+  secret := hex.EncodeToString(cmd.secret)
+
+  return any(buildContractOutput{
+    Secret:     &secret,
+    SecretHash: hex.EncodeToString(cmd.secretHash),
+    TxFee:      strconv.FormatUint(data.contractFee,10),
+    Contract:   hex.EncodeToString(data.contract),
+    Tx:         hex.EncodeToString(data.contractTxHash),
+  }),nil
 }
 
 func printTransaction(tx *externalapi.DomainTransaction, name string){
@@ -1093,43 +1082,21 @@ func printCommand(secret []byte, secretHash []byte, b *builtContract){
 
 }
 
-func (cmd *participateCmd) runCommand(mnemonics []string, daemonClient pb.KaspawalletdClient, ctx context.Context, keysFile *keys.File) error {
-  // locktime after 500,000,000 (Tue Nov  5 00:53:20 1985 UTC) is interpreted
-  // as a unix time rather than a block height.
-  b, err := buildContract(daemonClient, ctx, mnemonics, keysFile,
-    &contractArgs{
-      them:       cmd.cp1Addr,
-      amount:     cmd.amount,
-      locktime:   lockTimePartecipateContract,
-      secretHash: cmd.secretHash,
-  })
-  if err != nil {
-    return err
-  }
-
-  printCommand(nil,cmd.secretHash,b)
-
-  return promptPublishTx(*b.contractTx, "contract", daemonClient, ctx)
-}
-
-func (cmd *redeemCmd) runCommand(mnemonics []string, daemonClient pb.KaspawalletdClient, ctx context.Context, keysFile *keys.File) error {
-  out,_ := spendContract(mnemonics,daemonClient,ctx,keysFile,&spendArgs{
-    contract:   cmd.contract,
-    contractTx: *cmd.contractTx,
-    secret:     cmd.secret,
-  })
+func (cmd *spendArgsCmd) runCommand(mnemonics []string, daemonClient pb.KaspawalletdClient, ctx context.Context, keysFile *keys.File) error {
+  out,_ := spendContract(mnemonics,daemonClient,ctx,keysFile,cmd)
   printTransaction(out.spendTx,"RedeemTx")
   return promptPublishTx(*out.spendTx, "redeem",daemonClient,ctx)
 }
 
-func (cmd *refundCmd) runCommand(mnemonics []string, daemonClient pb.KaspawalletdClient, ctx context.Context, keysFile *keys.File) error {
-  out,_ := spendContract(mnemonics,daemonClient,ctx,keysFile,&spendArgs{
-    contract:   cmd.contract,
-    contractTx: cmd.contractTx,
-    secret:     nil,
-  })
-  printTransaction(out.spendTx,"RefundTx")
-  return promptPublishTx(*out.spendTx, "refund",daemonClient,ctx)
+func (cmd *spendArgsCmd) runDaemonCommand(mnemonics []string, daemonClient pb.KaspawalletdClient, ctx context.Context, keysFile *keys.File)(any, error) {
+  data,err := spendContract(mnemonics,daemonClient,ctx,keysFile,cmd)
+  if err != nil {
+    return nil,err
+  }
+  return any(spendContractOutput{
+        Tx:     hex.EncodeToString(data.spendTxHash),
+        TxFee:  strconv.FormatUint(data.spendTxFee,10),
+  }),nil
 }
 
 func (cmd *extractSecretCmd) runCommand(mnemonics []string, daemonClient pb.KaspawalletdClient, ctx context.Context, keysFile *keys.File) error {
@@ -1156,9 +1123,18 @@ func (cmd *extractSecretCmd) runOfflineCommand() error {
   }
   return errors.New("transaction does not contain the secret")
 }
+func (cmd *extractSecretCmd) runDaemonCommand(mnemonics []string, daemonClient pb.KaspawalletdClient, ctx context.Context, keysFile *keys.File) error {
+  return cmd.runOfflineCommand()
+}
 
 func (cmd *auditContractCmd) runCommand(mnemonics []string, daemonClient pb.KaspawalletdClient, ctx context.Context, keysFile *keys.File) error {
-  return cmd.runOfflineCommand()
+  audited,err := auditContract(daemonClient, ctx,keysFile, *cmd)
+  if err != nil {
+    panic(err)
+  }
+  printAuditResult(*audited)
+  return nil
+
 }
 
 func (cmd *auditContractCmd) runOfflineCommand() error {
@@ -1169,6 +1145,53 @@ func (cmd *auditContractCmd) runOfflineCommand() error {
   printAuditResult(*audited)
   return nil
 }
+
+func (cmd *auditContractCmd) runDaemonCommand(mnemonics []string, daemonClient pb.KaspawalletdClient, ctx context.Context, keysFile *keys.File) (any,error) {
+  data,err := auditContract(nil, nil, nil, *cmd)
+  return any(auditContractOutput{
+    ContractAddress:  fmt.Sprintf("%v",data.contractP2SH),
+    RecipientAddress: fmt.Sprintf("%v",*data.recipient),
+    Recipient2b:      fmt.Sprintf("%x",data.recipient2b),
+    Amount:           strconv.FormatUint(data.amount,10),
+    RefundAddress:    fmt.Sprintf("%v",*data.author),
+    Refund2b:         fmt.Sprintf("%x",data.author2b),
+    SecretHash:       fmt.Sprintf("%x",data.secretHash),
+    LockTime:         fmt.Sprintf("%d",data.lockTime),
+    TxId:             fmt.Sprintf("%x",data.txId),
+    //TxFee:            strconv.FormatUint(data.txFee,10),
+    DaaScore:         fmt.Sprintf("%d",data.daaScore),
+    VSPBS:            fmt.Sprintf("%d",data.vspbs),
+    IsSpendable:      strconv.FormatBool(data.isSpendable),
+  }),err
+}
+func (cmd walletBalanceCmd) runDaemonCommand(mnemonics []string, daemonClient pb.KaspawalletdClient, ctx context.Context, keysFile *keys.File) (any,error) {
+  balanceResponse,err := daemonClient.GetBalance(ctx, &pb.GetBalanceRequest{})
+  balanceAddresses := []*AddressBalance{{}}
+  for _,balance := range balanceResponse.AddressBalances{
+    balanceAddresses = append(balanceAddresses, &AddressBalance{
+      Address:    balance.Address,
+      Available:  strconv.FormatUint(balance.Available,10),
+      Pending:    strconv.FormatUint(balance.Pending,10),
+    })
+  }
+  return any(walletBalanceOutput{
+    Available:  strconv.FormatUint(balanceResponse.Available,10),
+    Pending:    strconv.FormatUint(balanceResponse.Pending,10),
+    AddressBalances: balanceAddresses,
+  }),err
+
+
+}
+func (cmd atomicSwapParamsCmd) runDaemonCommand(mnemonics []string, daemonClient pb.KaspawalletdClient, ctx context.Context, keysFile *keys.File) (any,error) {
+  changeAddrs, err:= daemonClient.NewAddress(ctx, &pb.NewAddressRequest{})
+  return any(atomicSwapParamsOutput{
+    ReciptAddress:          changeAddrs.String(),
+    MaxSecretLen:           strconv.FormatInt(secretSize,10),
+    MinLockTimeInitiate:    string(*ltInitiate),
+    MinLockTimePartecipate: string(*ltInitiate),
+  }),err
+}
+
 
 func getKaspaXSompi(value uint64) float64{
   return float64(value)/float64(constants.SompiPerKaspa)
@@ -1246,7 +1269,7 @@ func auditContract(daemonClient pb.KaspawalletdClient, ctx context.Context, keys
   },nil
 }
 
-func printAuditResult(audited auditedContract) error{
+func  printAuditResult(audited auditedContract) error{
   if audited.secretSize != secretSize {
     return fmt.Errorf("contract specifies strange secret size %v", audited.secretSize)
   }
@@ -1426,7 +1449,7 @@ func secretHashFromString(ssecretHash *string)([]byte,error){
   return secretHash,nil
 }
 
-func parseBuildArgs(args buildContractInput)(*contractArgs,error){
+func parseBuildArgs(args buildContractInput)(*contractArgsCmd,error){
   cp2AddrP2PKH,err := addressFromString(args.Them)
   if err != nil {
     return nil, err
@@ -1440,16 +1463,16 @@ func parseBuildArgs(args buildContractInput)(*contractArgs,error){
   var lockTime uint64
   if args.SecretHash == nil || *args.SecretHash == ""{
     secret,secretHash,_ = getSecret()
-    lockTime = lockTimeInitiateContract
+    lockTime = uint64(time.Now().Add(time.Duration(*ltInitiate) * time.Hour).Unix()*1000)
   }else{
     secret = nil
     secretHash,err = secretHashFromString(args.SecretHash)
     if err != nil{
       return nil, err
     }
-    lockTime = lockTimePartecipateContract
+    lockTime = uint64(time.Now().Add(time.Duration(*ltPartecipate) * time.Hour).Unix()*1000)
   }
-  return &contractArgs {
+  return &contractArgsCmd{
     them:       cp2AddrP2PKH,
     amount:     *amount,
     secretHash: secretHash,
@@ -1458,7 +1481,7 @@ func parseBuildArgs(args buildContractInput)(*contractArgs,error){
   },nil
 }
 
-func parseSpendArgs(args spendContractInput)(*spendArgs, error){
+func parseSpendArgs(args spendContractInput)(*spendArgsCmd, error){
     contract, err := contractFromString(args.Contract)
     if err!=nil{
       return nil, err
@@ -1472,7 +1495,7 @@ func parseSpendArgs(args spendContractInput)(*spendArgs, error){
       return nil, err
     }
 
-    return &spendArgs{
+    return &spendArgsCmd{
       contract:   contract,
       contractTx: contractTx,
       secret:     secret,
@@ -1515,7 +1538,8 @@ func parseBody[V *buildContractInput | *spendContractInput | *auditContractInput
   return nil
 }
 
-func writeResult[V buildContractOutput | spendContractOutput | auditContractOutput | extractSecretOutput | pushTxOutput](w http.ResponseWriter, err error, result V){
+//func writeResult[V buildContractOutput | spendContractOutput | auditContractOutput | extractSecretOutput | pushTxOutput | atomicSwapParamsOutput | walletBalanceOutput](w http.ResponseWriter, err error, result V){
+func writeResult(w http.ResponseWriter, err error, result any){
     w.Header().Set("Content-Type", "application/json")
   if err != nil {
     fmt.Println("/////////////////////////////////error",err)
@@ -1535,6 +1559,8 @@ func restApiRequestsHandlers() {
   http.HandleFunc("/auditcontract", auditEndpoint)
   http.HandleFunc("/extractsecret", extractSecretEndpoint)
   http.HandleFunc("/pushtx",pushTxEndpoint)
+  http.HandleFunc("/walletbalance",walletBalanceEndpoint)
+  http.HandleFunc("/getatomicswapparams",atomicSwapParamsEndpoint)
 }
 
 // Check if BTC / KAS network are available
@@ -1573,13 +1599,34 @@ func pushTxEndpoint(w http.ResponseWriter, r *http.Request) {
   parseBody(r,&args)
   txId,err := pushTx(args)
   if err != nil {
-    fmt.Println("pèorcodio",err)
+    fmt.Println("error:",err)
   }
   writeResult(w,err,pushTxOutput{
   TxId: fmt.Sprintf("%v",getNil(txId)),
   })
 }
+func mainEndPoint(cmd daemonCommand,err error, w http.ResponseWriter, r *http.Request){
+  if err!= nil {
+    writeResult(w,err,nil)
+  }
+  daemonClient, tearDown, err := client.Connect(*connectWalletFlag)
+  if err != nil {log.Fatal(err)}
+  defer tearDown()
+  ctx, cancel := context.WithTimeout(context.Background(), (10 * time.Minute))
+  defer cancel()
 
+  keysFile, err := keys.ReadKeysFile(chainParams, defaultKeysFile(chainParams))
+  if err != nil {log.Fatal(err)}
+
+  mnemonics, err := keysFile.DecryptMnemonics(daemonPassword)
+  if err != nil {log.Fatal(err)}
+
+  out, err := cmd.runDaemonCommand(mnemonics,daemonClient,ctx,keysFile)
+  if nil!= err {
+    fmt.Println(err)
+  }
+  writeResult(w,err,out)
+}
 // Initiate swap contract
 func initiateEnpoint(w http.ResponseWriter, r *http.Request) {
   buildSwapContractEndpoint(w,r)
@@ -1600,33 +1647,7 @@ func auditEndpoint(w http.ResponseWriter,r *http.Request){
   var  args auditContractInput
   parseBody(r,&args)
   input,err := parseAuditContractArgs(args)
-
-  daemonClient, tearDown, err := client.Connect(*connectWalletFlag)
-  if err != nil {log.Fatal(err)}
-  defer tearDown()
-  ctx, cancel := context.WithTimeout(context.Background(), (10 * time.Minute))
-  defer cancel()
-  keysFile, err := keys.ReadKeysFile(chainParams, defaultKeysFile(chainParams))
-  if err != nil {log.Fatal(err)}
-
-
-  data,err := auditContract(daemonClient,  ctx, keysFile, *input)
-  writeResult(w,err,auditContractOutput{
-    ContractAddress:  fmt.Sprintf("%v",data.contractP2SH),
-    RecipientAddress: fmt.Sprintf("%v",data.recipient),
-    Recipient2b:      fmt.Sprintf("%x",data.recipient2b),
-    Amount:           strconv.FormatUint(data.amount,10),
-    RefundAddress:    fmt.Sprintf("%v",data.author),
-    Refund2b:         fmt.Sprintf("%x",data.author2b),
-    SecretHash:       fmt.Sprintf("%x",data.secretHash),
-    LockTime:         fmt.Sprintf("%d",data.lockTime),
-    TxId:             fmt.Sprintf("%x",data.txId),
-    //TxFee:            strconv.FormatUint(data.txFee,10),
-    DaaScore:         fmt.Sprintf("%d",data.daaScore),
-    VSPBS:            fmt.Sprintf("%d",data.vspbs),
-    IsSpendable:      strconv.FormatBool(data.isSpendable),
-  })
-
+  mainEndPoint(input,err,w,r)
 }
 
 func extractSecretEndpoint(w http.ResponseWriter,r *http.Request){
@@ -1641,55 +1662,41 @@ func buildSwapContractEndpoint(w http.ResponseWriter, r *http.Request) {
   var  args buildContractInput
   parseBody(r,&args)
 
-  daemonClient, tearDown, err := client.Connect(*connectWalletFlag)
-  if err != nil {log.Fatal(err)}
-  defer tearDown()
-  ctx, cancel := context.WithTimeout(context.Background(), (10 * time.Minute))
-  defer cancel()
-  keysFile, err := keys.ReadKeysFile(chainParams, defaultKeysFile(chainParams))
-  if err != nil {log.Fatal(err)}
-  mnemonics, err := keysFile.DecryptMnemonics(daemonPassword)
-  if err != nil {log.Fatal(err)}
-  fmt.Println("\nHello")
   buildArgs,err := parseBuildArgs(args)
-  if err!=nil{
-    log.Fatal(err)
-  }
-  fmt.Println(*buildArgs.them)
-  fmt.Println(buildArgs.amount)
   fmt.Println("Initiate contract requested: ", buildArgs.them, buildArgs.amount)
-  data, err := buildContract(daemonClient, ctx, mnemonics, keysFile, buildArgs)
-  secret := hex.EncodeToString(buildArgs.secret)
-  writeResult(w,err, buildContractOutput{
-    Secret:     &secret,
-    SecretHash: hex.EncodeToString(buildArgs.secretHash),
-    TxFee:      strconv.FormatUint(data.contractFee,10),
-    Contract:   hex.EncodeToString(data.contract),
-    Tx:         hex.EncodeToString(data.contractTxHash),
-    })
+  mainEndPoint(buildArgs,err,w,r)
 }
 
 func spendSwapContractEndpoint(w http.ResponseWriter, r *http.Request) {
   var args spendContractInput
   parseBody(r,&args)
-
-  daemonClient, tearDown, err := client.Connect(*connectWalletFlag)
-  if err != nil {log.Fatal(err)}
-  defer tearDown()
-  ctx, cancel := context.WithTimeout(context.Background(), (10 * time.Minute))
-  defer cancel()
-  keysFile, err := keys.ReadKeysFile(chainParams, defaultKeysFile(chainParams))
-  if err != nil {log.Fatal(err)}
-  mnemonics, err := keysFile.DecryptMnemonics(daemonPassword)
-  if err != nil {log.Fatal(err)}
-
-
   input, err := parseSpendArgs(args)
-  data, err := spendContract(mnemonics,daemonClient, ctx, keysFile,input)
-  writeResult(w,err,spendContractOutput{
-        Tx:     hex.EncodeToString(data.spendTxHash),
-        TxFee:  strconv.FormatUint(data.spendTxFee,10),
-  })
+  mainEndPoint(input,err,w,r)
+}
+func atomicSwapParamsEndpoint(w http.ResponseWriter, r *http.Request) {
+  mainEndPoint(atomicSwapParamsCmd{},nil,w,r)
+}
+func walletBalanceEndpoint(w http.ResponseWriter, r *http.Request){
+  mainEndPoint(walletBalanceCmd{},nil,w,r)
+}
+
+type atomicSwapParamsOutput struct {
+  ReciptAddress string  `json:"ReciptAddress"`
+  MaxSecretLen  string  `json:"MaxSecretLen"`
+  MinLockTimeInitiate   string  `json:"MinLockTimeInitiate"`
+  MinLockTimePartecipate   string  `json:"MinLockTimePartecipate"`
+}
+
+type walletBalanceOutput struct {
+  Available         string             `json:"Available"`
+  Pending           string             `json:"Pending"`
+  AddressBalances   []*AddressBalance  `json:"Addresses"`
+}
+
+type AddressBalance struct {
+  Address   string `json:"Address"`
+  Available string `json:"Available"`
+  Pending   string `json:"Pending"`
 }
 
 type buildContractOutput struct {
