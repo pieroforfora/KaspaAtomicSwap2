@@ -106,7 +106,7 @@ var (
 
 func init() {
   flagset.Usage = func() {
-    fmt.Println("Usage: btcatomicswap [flags] cmd [cmd args]")
+    fmt.Println("Usage: kaspaatomicswap [flags] cmd [cmd args]")
     fmt.Println()
     fmt.Println("Commands:")
     fmt.Println("  initiate <participant address> <amount>")

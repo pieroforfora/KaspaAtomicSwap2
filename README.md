@@ -26,6 +26,69 @@ download it locally and use replace method in the go.mod file
 
 
 
+Usage: kaspaatomicswap [flags] cmd [cmd args]
+
+
+Commands:
+
+  initiate <participant address> <amount>
+
+  participate <initiator address> <amount> <secret hash>
+
+  redeem <contract> <contract transaction> <secret>
+
+  refund <contract> <contract transaction>
+
+  extractsecret <redemption transaction> <secret hash>
+
+  auditcontract <contract> <contract transaction>
+
+  auditcontractonline <contract> <contract transaction>
+
+  daemon
+
+  pushtx <tx>
+
+
+Flags:
+
+  -devnet
+
+    	use devnet network
+
+  -kaspad string
+
+    	host[:port] of kaspad RPC server (default "localhost:16610")
+
+  -kaspawallet string
+
+    	host[:port] of kaspawallet  RPC server (default "localhost:8082")
+
+  -ltInitiate int
+
+    	min initiate locktime in hours  (default 48)
+
+  -ltPartecipate int
+
+    	min partecipate locktime in hours (default 24)
+
+  -secretSize int
+
+    	min partecipate locktime in hours (default 32)
+
+  -testnet
+
+    	use testnet network
+
+  -verbose
+
+    	verbose
+
+
+
+
+
+
 start daemon:
 
 **go run main.go -devnet daemon**
